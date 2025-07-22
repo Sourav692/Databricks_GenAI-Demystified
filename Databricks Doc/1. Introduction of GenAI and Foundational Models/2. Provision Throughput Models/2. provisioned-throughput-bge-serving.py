@@ -1,4 +1,9 @@
 # Databricks notebook source
+# MAGIC %md
+# MAGIC Reference: https://docs.databricks.com/aws/en/notebooks/source/machine-learning/large-language-models/provisioned-throughput-bge-serving.html
+
+# COMMAND ----------
+
 # DBTITLE 1,a
 # MAGIC %md
 # MAGIC # Provisioned Throughput BGE serving example

@@ -1,5 +1,10 @@
 # Databricks notebook source
 # MAGIC %md
+# MAGIC https://assets.docs.databricks.com/_extras/notebooks/source/machine-learning/test-serverless-endpoint-example.html
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Test Serverless endpoint by querying your model 
 # MAGIC
 # MAGIC The notebook loads an input example that was logged with the registered model, `ElasticNetDiabetes`, and queries the model to test the servereless endpoint.

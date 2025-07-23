@@ -1,5 +1,15 @@
 # Databricks notebook source
 # MAGIC %md
+# MAGIC https://docs.databricks.com/aws/en/machine-learning/model-serving/create-manage-serving-endpoints
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## train-register-hugging-face-model-serving
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC This notebook logs a HuggingFace model with an input example and a model signature and registers it to Unity Catalog.
 # MAGIC
 # MAGIC After you run this notebook in its entirety, you have a registered model for model serving with Databricks Model Serving ([AWS](https://docs.databricks.com/machine-learning/model-serving/index.html)|[Azure](https://learn.microsoft.com/azure/databricks/machine-learning/model-serving/index.html)| [GCP](https://docs.gcp.databricks.com/machine-learning/model-serving/index)).

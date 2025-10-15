@@ -1,13 +1,25 @@
 import json
-import warnings
-from typing import Any, Callable, Generator, Optional
+from typing import Annotated, Any, Generator, Optional, Sequence, TypedDict, Union
 from uuid import uuid4
 
-import backoff
 import mlflow
-import openai
-from databricks.sdk import WorkspaceClient
-from databricks_openai import UCFunctionToolkit, VectorSearchRetrieverTool
+from databricks_langchain import (
+    ChatDatabricks,
+    UCFunctionToolkit,
+    VectorSearchRetrieverTool,
+)
+from langchain_core.language_models import LanguageModelLike
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    convert_to_openai_messages,
+)
+from langchain_core.runnables import RunnableConfig, RunnableLambda
+from langchain_core.tools import BaseTool
+from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt.tool_node import ToolNode
 from mlflow.entities import SpanType
 from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import (
@@ -15,21 +27,17 @@ from mlflow.types.responses import (
     ResponsesAgentResponse,
     ResponsesAgentStreamEvent,
 )
-from openai import OpenAI
-from pydantic import BaseModel
-from unitycatalog.ai.core.base import get_uc_function_client
 
 ############################################
 # Define your LLM endpoint and system prompt
 ############################################
 # TODO: Replace with your model serving endpoint
+# LLM_ENDPOINT_NAME = "databricks-claude-3-7-sonnet"
 LLM_ENDPOINT_NAME = "databricks-claude-3-7-sonnet"
+llm = ChatDatabricks(endpoint=LLM_ENDPOINT_NAME)
 
 # TODO: Update with your system prompt
-SYSTEM_PROMPT = """
-You are a helpful assistant that can run Python code.
-"""
-
+system_prompt = "You are a helpful assistant that can run Python code."
 
 ###############################################################################
 ## Define tools for your agent, enabling it to retrieve data or take actions
@@ -37,57 +45,17 @@ You are a helpful assistant that can run Python code.
 ## To create and see usage examples of more tools, see
 ## https://docs.databricks.com/en/generative-ai/agent-framework/agent-tool.html
 ###############################################################################
-class ToolInfo(BaseModel):
-    """
-    Class representing a tool for the agent.
-    - "name" (str): The name of the tool.
-    - "spec" (dict): JSON description of the tool (matches OpenAI Responses format)
-    - "exec_fn" (Callable): Function that implements the tool logic
-    """
+tools = []
 
-    name: str
-    spec: dict
-    exec_fn: Callable
-
-
-def create_tool_info(tool_spec, exec_fn_param: Optional[Callable] = None):
-    """
-    Factory function to create ToolInfo objects from a given tool spec
-    and (optionally) a custom execution function.
-    """
-    # Remove 'strict' property, as Claude models do not support it in tool specs.
-    tool_spec["function"].pop("strict", None)
-    tool_name = tool_spec["function"]["name"]
-    # Converts tool name with double underscores to UDF dot notation.
-    udf_name = tool_name.replace("__", ".")
-
-    # Define a wrapper that accepts kwargs for the UC tool call,
-    # then passes them to the UC tool execution client
-    def exec_fn(**kwargs):
-        function_result = uc_function_client.execute_function(udf_name, kwargs)
-        # Return error message if execution fails, result value if not.
-        if function_result.error is not None:
-            return function_result.error
-        else:
-            return function_result.value
-
-    return ToolInfo(name=tool_name, spec=tool_spec, exec_fn=exec_fn_param or exec_fn)
-
-
-# List to store information about all tools available to the agent.
-TOOL_INFOS = []
-
-# UDFs in Unity Catalog can be exposed as agent tools.
-# The following code enables a python code interpreter tool using the system.ai.python_exec UDF.
+# You can use UDFs in Unity Catalog as agent tools
+# Below, we add the `system.ai.python_exec` UDF, which provides
+# a python code interpreter tool to our agent
+# You can also add local LangChain python tools. See https://python.langchain.com/docs/concepts/tools
 
 # TODO: Add additional tools
 UC_TOOL_NAMES = ["system.ai.python_exec"]
-
-uc_function_client = get_uc_function_client()
 uc_toolkit = UCFunctionToolkit(function_names=UC_TOOL_NAMES)
-for tool_spec in uc_toolkit.tools:
-    TOOL_INFOS.append(create_tool_info(tool_spec))
-
+tools.extend(uc_toolkit.tools)
 
 # Use Databricks vector search indexes as tools
 # See https://docs.databricks.com/en/generative-ai/agent-framework/unstructured-retrieval-tools.html#locally-develop-vector-search-retriever-tools-with-ai-bridge
@@ -105,80 +73,112 @@ VECTOR_SEARCH_TOOLS = []
 #     )
 # )
 
-for vs_tool in VECTOR_SEARCH_TOOLS:
-    TOOL_INFOS.append(create_tool_info(vs_tool.tool, vs_tool.execute))
+tools.extend(VECTOR_SEARCH_TOOLS)
+
+#####################
+## Define agent logic
+#####################
 
 
-class ToolCallingAgent(ResponsesAgent):
-    """
-    Class representing a tool-calling Agent.
-    Handles both tool execution via exec_fn and LLM interactions via model serving.
-    """
+class AgentState(TypedDict):
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    custom_inputs: Optional[dict[str, Any]]
+    custom_outputs: Optional[dict[str, Any]]
 
-    def __init__(self, llm_endpoint: str, tools: list[ToolInfo]):
-        """Initializes the ToolCallingAgent with tools."""
-        self.llm_endpoint = llm_endpoint
-        self.workspace_client = WorkspaceClient()
-        self.model_serving_client: OpenAI = (
-            self.workspace_client.serving_endpoints.get_open_ai_client()
+
+def create_tool_calling_agent(
+    model: LanguageModelLike,
+    tools: Union[ToolNode, Sequence[BaseTool]],
+    system_prompt: Optional[str] = None,
+):
+    model = model.bind_tools(tools)
+
+    # Define the function that determines which node to go to
+    def should_continue(state: AgentState):
+        messages = state["messages"]
+        last_message = messages[-1]
+        # If there are function calls, continue. else, end
+        if isinstance(last_message, AIMessage) and last_message.tool_calls:
+            return "continue"
+        else:
+            return "end"
+
+    if system_prompt:
+        preprocessor = RunnableLambda(
+            lambda state: [{"role": "system", "content": system_prompt}] + state["messages"]
         )
-        self._tools_dict = {tool.name: tool for tool in tools}
+    else:
+        preprocessor = RunnableLambda(lambda state: state["messages"])
+    model_runnable = preprocessor | model
 
-    def get_tool_specs(self) -> list[dict]:
-        """Returns tool specifications in the format OpenAI expects."""
-        return [tool_info.spec for tool_info in self._tools_dict.values()]
+    def call_model(
+        state: AgentState,
+        config: RunnableConfig,
+    ):
+        response = model_runnable.invoke(state, config)
 
-    @mlflow.trace(span_type=SpanType.TOOL)
-    def execute_tool(self, tool_name: str, args: dict) -> Any:
-        """Executes the specified tool with the given arguments."""
-        return self._tools_dict[tool_name].exec_fn(**args)
+        return {"messages": [response]}
 
-    @backoff.on_exception(backoff.expo, openai.RateLimitError)
-    @mlflow.trace(span_type=SpanType.LLM)
-    def call_llm(self, messages: list[dict[str, Any]]) -> Generator[dict[str, Any], None, None]:
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="PydanticSerializationUnexpectedValue")
-            for chunk in self.model_serving_client.chat.completions.create(
-                model=self.llm_endpoint,
-                messages=self.prep_msgs_for_cc_llm(messages),
-                tools=self.get_tool_specs(),
-                stream=True,
-            ):
-                yield chunk.to_dict()
+    workflow = StateGraph(AgentState)
 
-    def handle_tool_call(
-        self, tool_call: dict[str, Any], messages: list[dict[str, Any]]
-    ) -> ResponsesAgentStreamEvent:
-        """
-        Execute tool calls, add them to the running message history, and return a ResponsesStreamEvent w/ tool output
-        """
-        args = json.loads(tool_call["arguments"])
-        result = str(self.execute_tool(tool_name=tool_call["name"], args=args))
+    workflow.add_node("agent", RunnableLambda(call_model))
+    workflow.add_node("tools", ToolNode(tools))
 
-        tool_call_output = self.create_function_call_output_item(tool_call["call_id"], result)
-        messages.append(tool_call_output)
-        return ResponsesAgentStreamEvent(type="response.output_item.done", item=tool_call_output)
+    workflow.set_entry_point("agent")
+    workflow.add_conditional_edges(
+        "agent",
+        should_continue,
+        {
+            "continue": "tools",
+            "end": END,
+        },
+    )
+    workflow.add_edge("tools", "agent")
 
-    def call_and_run_tools(
-        self,
-        messages: list[dict[str, Any]],
-        max_iter: int = 10,
-    ) -> Generator[ResponsesAgentStreamEvent, None, None]:
-        for _ in range(max_iter):
-            last_msg = messages[-1]
-            if last_msg.get("role", None) == "assistant":
-                return
-            elif last_msg.get("type", None) == "function_call":
-                yield self.handle_tool_call(last_msg, messages)
-            else:
-                yield from self.output_to_responses_items_stream(
-                    chunks=self.call_llm(messages), aggregator=messages
-                )
+    return workflow.compile()
 
-        yield ResponsesAgentStreamEvent(
-            type="response.output_item.done",
-            item=self.create_text_output_item("Max iterations reached. Stopping.", str(uuid4())),
-        )
+
+class LangGraphResponsesAgent(ResponsesAgent):
+    def __init__(self, agent):
+        self.agent = agent
+
+    def _langchain_to_responses(self, messages: list[BaseMessage]) -> list[dict[str, Any]]:
+        "Convert from ChatCompletion dict to Responses output item dictionaries"
+        for message in messages:
+            message = message.model_dump()
+            role = message["type"]
+            print(message)
+            print("-----------------------")
+            print(f"role is {role}")
+            if role == "ai":
+                # The ':=' operator is the "walrus operator" (assignment expression) in Python 3.8+.
+                # It assigns the value of message.get("tool_calls") to tool_calls and checks if it's truthy.
+                if tool_calls := message.get("tool_calls"):
+                    return [
+                        self.create_function_call_item(
+                            id=message.get("id") or str(uuid4()),
+                            call_id=tool_call["id"],
+                            name=tool_call["name"],
+                            arguments=json.dumps(tool_call["args"]),
+                        )
+                        for tool_call in tool_calls
+                    ]
+                else:
+                    return [
+                        self.create_text_output_item(
+                            text=message["content"],
+                            id=message.get("id") or str(uuid4()),
+                        )
+                    ]
+            elif role == "tool":
+                return [
+                    self.create_function_call_output_item(
+                        call_id=message["tool_call_id"],
+                        output=message["content"],
+                    )
+                ]
+            elif role == "user":
+                return [message]
 
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
         outputs = [
@@ -189,15 +189,31 @@ class ToolCallingAgent(ResponsesAgent):
         return ResponsesAgentResponse(output=outputs, custom_outputs=request.custom_inputs)
 
     def predict_stream(
-        self, request: ResponsesAgentRequest
+        self,
+        request: ResponsesAgentRequest,
     ) -> Generator[ResponsesAgentStreamEvent, None, None]:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + [
-            i.model_dump() for i in request.input
-        ]
-        yield from self.call_and_run_tools(messages=messages)
+        cc_msgs = self.prep_msgs_for_cc_llm([i.model_dump() for i in request.input])
+
+        for event in self.agent.stream({"messages": cc_msgs}, stream_mode=["updates", "messages"]):
+            if event[0] == "updates":
+                for node_data in event[1].values():
+                    for item in self._langchain_to_responses(node_data["messages"]):
+                        yield ResponsesAgentStreamEvent(type="response.output_item.done", item=item)
+            # filter the streamed messages to just the generated text messages
+            elif event[0] == "messages":
+                try:
+                    chunk = event[1][0]
+                    if isinstance(chunk, AIMessageChunk) and (content := chunk.content):
+                        yield ResponsesAgentStreamEvent(
+                            **self.create_text_delta(delta=content, item_id=chunk.id),
+                        )
+                except Exception as e:
+                    print(e)
 
 
-# Log the model using MLflow
-mlflow.openai.autolog()
-AGENT = ToolCallingAgent(llm_endpoint=LLM_ENDPOINT_NAME, tools=TOOL_INFOS)
+# Create the agent object, and specify it as the agent object to use when
+# loading the agent back for inference via mlflow.models.set_model()
+mlflow.langchain.autolog()
+agent = create_tool_calling_agent(llm, tools, system_prompt)
+AGENT = LangGraphResponsesAgent(agent)
 mlflow.models.set_model(AGENT)

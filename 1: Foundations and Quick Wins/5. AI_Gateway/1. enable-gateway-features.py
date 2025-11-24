@@ -5,6 +5,15 @@
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC [Mosaic AI Gateway introduction](https://docs.databricks.com/aws/en/ai-gateway/)
+# MAGIC
+# MAGIC [Configure AI Gateway on model serving endpoints](https://docs.databricks.com/aws/en/ai-gateway/configure-ai-gateway-endpoints)
+# MAGIC
+# MAGIC [Monitor served models using AI Gateway-enabled inference tables](https://docs.databricks.com/aws/en/ai-gateway/inference-tables)
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC # Enable Databricks Mosaic AI Gateway features
 # MAGIC
 # MAGIC This notebook shows how to enable and use Databricks Mosaic AI Gateway features to manage and govern models from providers, such as OpenAI and Anthropic. 

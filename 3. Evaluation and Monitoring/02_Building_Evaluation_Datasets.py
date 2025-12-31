@@ -1,9 +1,9 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Module 2: Building Evaluation Datasets
-# MAGIC 
+# MAGIC
 # MAGIC **Objective:** Create and manage evaluation datasets in Unity Catalog
-# MAGIC 
+# MAGIC
 # MAGIC **What you'll learn:**
 # MAGIC - Create evaluation datasets in Unity Catalog
 # MAGIC - Add records from manual entry
@@ -36,7 +36,7 @@ print(f"✅ Experiment: {experiment_name}")
 
 # MAGIC %md
 # MAGIC ## Step 1: Define Unity Catalog Location
-# MAGIC 
+# MAGIC
 # MAGIC **Note:** Replace with your actual catalog and schema
 
 # COMMAND ----------
@@ -60,15 +60,27 @@ print(f"\nNote: Ensure you have CREATE TABLE permissions in {CATALOG}.{SCHEMA}")
 # COMMAND ----------
 
 import mlflow.genai.datasets
+from requests import HTTPError
 
 # Create a new evaluation dataset in Unity Catalog
-eval_dataset = mlflow.genai.datasets.create_dataset(
-    name=dataset_full_name,
-    description="Customer support agent evaluation dataset"
-)
-
-print(f"✅ Dataset created: {eval_dataset.name}")
-print(f"   Version: {eval_dataset.version}")
+# If it already exists, load the existing one
+try:
+    eval_dataset = mlflow.genai.datasets.get_dataset(
+        name=dataset_full_name
+    )
+    print(f"✅ Dataset created: {eval_dataset.name}")
+    # print(f"   Version: {eval_dataset.version}")
+except HTTPError as e:
+    if "TABLE_ALREADY_EXISTS" in str(e):
+        print(f"ℹ️  Dataset already exists, loading existing dataset...")
+        eval_dataset = mlflow.genai.datasets.get_dataset(
+            name=dataset_full_name
+        )
+        print(f"✅ Loaded existing dataset: {eval_dataset.name}")
+        print(f"   Current version: {eval_dataset.version}")
+        print(f"   Current records: {len(eval_dataset)}")
+    else:
+        raise
 
 # COMMAND ----------
 
@@ -183,18 +195,21 @@ print("  - metadata: Organization and context")
 
 # Add manual test cases to the dataset
 eval_dataset.merge_records(
-    records=manual_test_cases,
-    source="manual_curation"
+    records=manual_test_cases
 )
 
 print(f"✅ Added {len(manual_test_cases)} manual test cases")
-print(f"   Dataset now has {len(eval_dataset)} total records")
+print(f"   Dataset now has {len(eval_dataset.to_df())} total records")
+
+# COMMAND ----------
+
+display(eval_dataset.to_df())
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Step 5: Synthetic Data Generation (Optional)
-# MAGIC 
+# MAGIC
 # MAGIC **Note:** This requires documents to generate from. 
 # MAGIC We'll create sample documents for demonstration.
 
@@ -270,34 +285,33 @@ print(f"Created {len(sample_documents)} sample documents for synthetic generatio
 # Note: Uncomment and use this if you want to generate synthetic data
 # This may take a few minutes and requires LLM access
 
-# from databricks.agents.evals import generate_evals_df
+from databricks.agents.evals import generate_evals_df
 
-# synthetic_cases = generate_evals_df(
-#     docs=sample_documents,
-#     agent_description="""
-#     This is a customer support chatbot for an e-commerce company.
-#     It helps customers with questions about returns, shipping, warranties,
-#     and general product information.
-#     """,
-#     question_guidelines="""
-#     Generate questions that:
-#     - Are natural and conversational
-#     - Vary in complexity from simple to multi-part questions
-#     - Reflect real customer concerns
-#     - Are specific and realistic
-#     """,
-#     num_evals=10  # Generate 10 synthetic test cases
-# )
+synthetic_cases = generate_evals_df(
+    docs=sample_documents,
+    agent_description="""
+    This is a customer support chatbot for an e-commerce company.
+    It helps customers with questions about returns, shipping, warranties,
+    and general product information.
+    """,
+    question_guidelines="""
+    Generate questions that:
+    - Are natural and conversational
+    - Vary in complexity from simple to multi-part questions
+    - Reflect real customer concerns
+    - Are specific and realistic
+    """,
+    num_evals=10  # Generate 10 synthetic test cases
+)
 
-# print(f"Generated {len(synthetic_cases)} synthetic test cases")
+print(f"Generated {len(synthetic_cases)} synthetic test cases")
 
-# # Add synthetic cases to dataset
-# eval_dataset.merge_records(
-#     records=synthetic_cases,
-#     source="synthetic_generation"
-# )
+# Add synthetic cases to dataset
+eval_dataset.merge_records(
+    records=synthetic_cases
+)
 
-print("Note: Synthetic generation commented out - uncomment to use")
+print("Note: Synthetic generation completed")
 print("      This requires LLM access and may incur costs")
 
 # COMMAND ----------
@@ -468,7 +482,7 @@ print("""
 
 # MAGIC %md
 # MAGIC ## Summary
-# MAGIC 
+# MAGIC
 # MAGIC **What we accomplished:**
 # MAGIC 1. ✅ Created evaluation dataset in Unity Catalog
 # MAGIC 2. ✅ Added manual test cases with proper schema
@@ -476,7 +490,7 @@ print("""
 # MAGIC 4. ✅ Learned about synthetic data generation
 # MAGIC 5. ✅ Analyzed dataset composition
 # MAGIC 6. ✅ Understood versioning and governance
-# MAGIC 
+# MAGIC
 # MAGIC **Next Steps:**
 # MAGIC - Proceed to Notebook 3: Running Evaluations with Built-in Judges
 # MAGIC - Learn how to evaluate your agent using this dataset

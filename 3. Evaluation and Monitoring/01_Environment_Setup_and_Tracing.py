@@ -1,9 +1,9 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Module 1: Environment Setup and Agent Tracing
-# MAGIC 
+# MAGIC
 # MAGIC **Objective:** Set up MLflow 3 environment and learn basic tracing concepts
-# MAGIC 
+# MAGIC
 # MAGIC **What you'll learn:**
 # MAGIC - Install and verify MLflow 3.1+
 # MAGIC - Configure MLflow tracking
@@ -311,6 +311,8 @@ else:
 
 # COMMAND ----------
 
+from packaging import version
+
 def verify_setup():
     """
     Complete verification of environment setup
@@ -381,7 +383,7 @@ verify_setup()
 
 # MAGIC %md
 # MAGIC ## Summary
-# MAGIC 
+# MAGIC
 # MAGIC **What we accomplished:**
 # MAGIC 1. ✅ Installed MLflow 3.1+ with required dependencies
 # MAGIC 2. ✅ Configured MLflow tracking for Databricks
@@ -389,7 +391,11 @@ verify_setup()
 # MAGIC 4. ✅ Created traced functions with @mlflow.trace
 # MAGIC 5. ✅ Used span_type="RETRIEVER" for RAG systems
 # MAGIC 6. ✅ Verified complete trace structure
-# MAGIC 
+# MAGIC
 # MAGIC **Next Steps:**
 # MAGIC - Proceed to Notebook 2: Building Evaluation Datasets
 # MAGIC - Learn how to create test cases from traces, manual entry, and synthetic generation
+
+# COMMAND ----------
+
+
